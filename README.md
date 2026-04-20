@@ -1,397 +1,316 @@
 # Interruption-Based Multi-Agent Writing Helper
 
-This README describes what is already implemented in `interruption_writing_helper.py`, what still needs to be defined, and which packages are required.
+This project is a desktop writing assistant prototype built with Tkinter and AutoGen/OpenAI. It streams text, lets the user interrupt when a sentence feels wrong, guesses possible reasons for that interruption, proposes local replacement options, and learns from the user's choice through a concise preference profile plus an interruption/revision log.
 
-## Overview
+## What Is Already Implemented
 
-This project is a single-file prototype of an interruption-based AI writing helper with a popup desktop frontend.
+### 1. Modular project structure
+The project is no longer a single large script.
 
-The current structure follows the Project C proposal:
+Current layout:
 
-- a **streaming main writer**
-- a **monitor agent** that reacts after interruption
-- a **memory agent** that records dissatisfaction and updates restrictions
-- a **writing style agent** that infers style preferences
-- a **revision agent** that generates a revised continuation
-- an **orchestrator** that controls the workflow
-- a **Tkinter frontend** for user interaction
+- `writing.py` - small entry point
+- `writing_helper/main.py` - startup and API-key check
+- `writing_helper/ui.py` - Tkinter interface
+- `writing_helper/orchestrator.py` - workflow coordination
+- `writing_helper/agents.py` - writer, reason interpreter, replacement generator, preference memory
+- `writing_helper/models.py` - shared dataclasses and session state
+- `writing_helper/text_utils.py` - sentence extraction and JSON parsing helpers
+- `writing_helper/constants.py` - shared limits and regex constants
 
-The design matches the proposal logic:
-
-1. user enters task and style goal  
-2. main writer streams text  
-3. user stops when content becomes unsatisfactory  
-4. monitor agent proposes likely dissatisfaction reasons  
-5. user selects a reason or types a custom one  
-6. memory/style agents update constraints  
-7. revision agent generates a revised continuation  
-8. user can continue, accept, or interrupt again
-
----
-
-## What is already done
-
-### 1. Popup frontend window
+### 2. Popup desktop UI
 Implemented with `tkinter`.
 
 Current UI includes:
 
-- task / purpose input box
-- style goal input box
+- task / purpose input
+- broad style goal input
 - live document display
-- system / memory / state log
-- dissatisfaction option panel
-- custom reason text box
-- current restrictions panel
-- current style notes panel
+- system log
+- interruption context display
+- replacement option list
+- custom reason input for `Other`
+- user preference profile display
 - buttons for:
   - Start Streaming
   - Stop Streaming
   - Accept Current Text
   - Continue Generation
   - Export Session JSON
+  - Apply Selected Replacement
 
-When the `.py` file is run, a separate desktop window opens.
-
----
-
-### 2. Main streaming generation
-The main writer agent is set up with AutoGen and `model_client_stream=True`.
-
-Implemented in:
-
-- `StreamingWriterAgent`
+### 3. Streaming writer
+Implemented with AutoGen and `model_client_stream=True`.
 
 Current behavior:
 
-- builds a prompt from task, style goal, accepted text, restrictions, and style notes
-- streams text incrementally into the frontend
-- can be interrupted by the user with the Stop button
+- streams text into the UI
+- can be interrupted by the user
+- uses:
+  - task
+  - style goal
+  - accepted text
+  - current live text
+  - user preference profile
+  - recent interruption / revision history
 
----
-
-### 3. Agent roles are explicitly separated
-The file already contains these components:
-
-- `MonitorAgent`
-- `MemoryAgent`
-- `WritingStyleAgent`
-- `StreamingWriterAgent`
-- `RevisionAgent`
-- `WritingOrchestrator`
-
-The flow is explicit:
-
-`User -> Orchestrator -> StreamingWriterAgent -> interruption -> MonitorAgent -> user feedback -> MemoryAgent + WritingStyleAgent -> RevisionAgent -> back to main generation`
-
-So the skeleton for who points to who is already built.
-
----
-
-### 4. User input and interaction loop
+### 4. Sentence-aware interruption handling
 Implemented.
 
-The code currently accepts:
+When the user stops generation, the system:
 
-- writing task
-- broad style goal
-- dissatisfaction choice from monitor options
-- custom dissatisfaction reason if options do not fit
+- extracts the interrupted current sentence
+- also captures the previous sentence if available
+- records the replacement start point for local rewriting
 
-The monitor agent already generates a list of possible reasons such as:
+This context is shown in the UI and passed into the follow-up agents.
 
-- Too generic
-- Too formal
-- Too repetitive
-- Too long
-- Not natural enough
-- Off-topic
-- Need more academic tone
-- Need more concise wording
-- Other
-
----
-
-### 5. Memory/state update scaffold
+### 5. Reason interpreter agent
 Implemented.
 
-The `MemoryAgent` currently:
+The `ReasonInterpreterAgent`:
 
-- records dissatisfaction reason
-- converts that into simple restriction rules
-- updates the running session state
+- is stateless across calls
+- looks at the writing goal, current sentence, previous sentence, and preference profile
+- proposes likely reasons for interruption
+- returns up to 10 reasons, usually targeting about 5
+- excludes `Other` from generated reasons
 
-The `WritingStyleAgent` currently:
+There is also a local fallback path if JSON parsing or model output fails.
 
-- infers simple style notes from style goal and feedback
-- stores those notes in session state
-
-The system can also export the whole session as JSON.
-
----
-
-### 6. Revision path after interruption
+### 6. Replacement generator agent
 Implemented.
 
-After the user submits feedback:
+The `ReplacementAgent`:
 
-- the system updates restrictions
-- the system updates style notes
-- the revision agent generates a revised continuation
-- the updated state is visible in the UI
+- is stateless across calls
+- generates one local replacement per proposed reason
+- focuses on rewriting only the interrupted sentence or immediate local segment
+- adds an `Other` option separately in the orchestrator
 
----
+### 7. Preference memory
+Implemented.
 
-## What is still left for you to define
+The `PreferenceMemoryAgent`:
 
-This file is intentionally a scaffold. The architecture is done, but the exact research logic is still yours to specify.
+- stores a concise user preference profile
+- updates that profile from the reason tied to the replacement the user selected
+- adds custom text directly to the profile when the user chooses `Other`
 
-### 1. Exact dissatisfaction interpretation protocol
-Still open.
+The current design intentionally keeps the memory in one concise profile instead of giving memory to the reason or replacement agents.
 
-You said you want to decide:
+### 8. Interruption and revision log
+Implemented.
 
-- how interruption should be interpreted
-- when interruption counts as dissatisfaction
-- what monitor options should be shown
-- whether some options depend on the sentence where the stop happened
-- how custom reasons should be normalized into structured labels
+For each interruption, the system stores:
 
-Right now the monitor logic is heuristic and simple.
+- previous sentence
+- interrupted sentence
+- potential reasons considered
+- selected reason
+- selected revision
+- custom reason if `Other` is used
+- updated preference profile at that point
 
----
+This log is also fed back into the streaming writer for future generations.
 
-### 2. Exact restriction format
-Still open.
+### 9. Exportable session state
+Implemented.
 
-You said you want to decide:
+The session export includes:
 
-- how to add restrictions
-- whether restrictions are plain sentences, tags, JSON objects, or prompt blocks
-- whether restrictions should expire later
-- whether restrictions should be global or local to one revision region
+- current state snapshot
+- current replacement options
+- revision log
 
-Right now restrictions are stored as simple strings like:
+## What Is Still Missing
 
-- "Avoid generic filler and broad vague claims."
-- "Prefer shorter sentences and faster point delivery."
+These are the main gaps in the current prototype.
 
----
+### 1. Persistent memory across runs
+Not implemented.
 
-### 3. Exact inter-agent communication protocol
-Still open.
+Right now:
 
-You said you want to decide:
+- preference profile is session-only
+- interruption log is session-only
+- all learned behavior is lost when the app closes unless exported manually
 
-- how agents should pass information to each other
-- the prompt/message format between agents
-- whether agents share one document/state object or separate state
-- whether some agents should be LLM-driven and others rule-based
+Possible next step:
 
-Right now they share one Python `SessionState` object.
+- save/load JSON session files automatically
+- or use sqlite for a more durable profile/history store
 
-That is enough for a prototype, but not yet a formal protocol.
+### 2. Stronger document segmentation
+Partially implemented, but still simple.
 
----
+Right now:
 
-### 4. Whether monitor/style/memory should become full LLM agents
-Still open.
+- interruption handling is sentence-local
+- replacement is applied by replacing the interrupted tail from a computed start point
 
-Currently:
+Still missing:
 
-- `StreamingWriterAgent` uses AutoGen + model client
-- `RevisionAgent` reuses the same writer in revision mode
-- `MonitorAgent`, `MemoryAgent`, and `WritingStyleAgent` are local Python logic components
+- paragraph-aware replacement
+- selection of exact edit span beyond current heuristic
+- stronger handling for incomplete sentences, lists, or unusual punctuation
 
-That means the architecture is multi-component, but not every component is yet a separate LLM-backed AutoGen agent.
+### 3. Better revision-option ranking
+Not implemented.
 
-If you want, these can later be upgraded so each one has its own prompt and model behavior.
+Right now:
 
----
+- one replacement is generated per reason
+- the options are displayed in returned order
 
-### 5. Stronger streaming event handling for your exact package version
-Possibly needs adjustment.
+Still missing:
 
-The current file is written against current AutoGen-style interfaces, but streaming event object shapes sometimes differ slightly by package version.
+- scoring / ranking replacements
+- hiding weak duplicates
+- selecting top-k based on quality rather than raw generation order
 
-So after installation, you may need small edits in the section that reads streamed chunks from `run_stream(...)`.
+### 4. Better validation of LLM JSON output
+Partially implemented.
 
-The architecture is already correct; this is just version-specific polishing.
+Right now:
 
----
+- the system extracts a JSON object from raw model text
+- falls back to heuristic logic when parsing fails
 
-### 6. Better document control logic
-Still open.
+Still missing:
 
-You may later want to decide:
+- stricter schema validation
+- more robust handling of malformed model output
+- retries for invalid JSON
 
-- whether revision replaces only the interrupted local segment
-- whether revision appends to the current text
-- whether accepted text and live text should be split more formally
-- whether the user can choose among multiple revision candidates instead of one
+### 5. Persistent user profile management
+Not implemented.
 
-Right now the revision output is appended into the running live text.
+Still missing:
 
----
+- editing or deleting learned preferences
+- pinning / prioritizing preferences
+- merging similar preferences
+- profile import/export separate from full session export
 
-### 7. Persistent memory across runs
-Not implemented yet.
+### 6. Evaluation and analytics
+Not implemented.
 
-Current memory is session-only.
+Still missing:
 
-That means when the app closes, restrictions and revision history are lost unless exported manually.
+- user satisfaction metrics
+- counts of accepted vs replaced revisions
+- time-to-accept measurements
+- side-by-side evaluation workflow
 
-If you later want persistent memory, you can add:
+### 7. Runtime-tested streaming polish
+Partially implemented, not fully verified.
 
-- local JSON storage
-- sqlite
-- redis
-- diskcache
-- vector database
-- another user profile file
+The current code compiles and imports, but the exact AutoGen streaming event behavior should still be tested live with your API key and real generation runs.
 
----
+### 8. README-level setup helpers
+Still missing a few project niceties:
 
-### 8. Evaluation module
-Not implemented yet.
+- `requirements.txt`
+- `.gitignore`
+- optional `.env` loading
+- automated tests
 
-Your proposal mentions evaluation through:
+## Current Workflow
 
-- user satisfaction survey
-- outside readers judging whether output is more human-like
+The current interaction loop is:
 
-The current code does not yet include:
+1. user enters task and style goal
+2. streaming writer generates text
+3. user interrupts when the current sentence feels wrong
+4. system extracts current and previous sentence
+5. reason interpreter guesses likely interruption reasons
+6. replacement generator produces one local replacement per reason
+7. user selects one replacement, or chooses `Other`
+8. selected reason or custom reason is added to the preference profile
+9. interruption record is stored in the revision log
+10. future streaming uses both:
+   - preference profile
+   - interruption / revision history
 
-- survey forms
-- logging of evaluation metrics
-- side-by-side blind comparison workflow
-- automatic tracking of revision counts / time saved / accepted outputs
+## Current Design Decisions
 
----
+The prototype currently uses:
 
-## Current design decisions in the prototype
+- one shared `SessionState`
+- stateless reason and replacement agents
+- one concise memory profile
+- one interruption/revision log
+- Tkinter desktop UI
+- AutoGen/OpenAI for streaming and agent calls
+- local heuristic fallbacks when LLM JSON output is missing or malformed
 
-These are the current defaults used only to make the scaffold run:
+## Requirements
 
-- one shared `SessionState` object
-- simple restriction strings
-- simple style notes
-- heuristic monitor logic
-- one streaming writer model
-- one revision mode using the same writer model
-- Tkinter desktop app frontend
-- background async loop for model calls
-
-You can replace any of these later.
-
----
-
-## Required packages
-
-Install these first:
+Install required packages:
 
 ```bash
 pip install -U "autogen-agentchat" "autogen-ext[openai]" openai
 ```
 
-`tkinter` is also used, but on many Python installations it is already included.
+`tkinter` is also required. On many Python installs it is already included.
 
-If `tkinter` is missing:
-
-### Windows
-Usually bundled with standard Python from python.org.
-
-### Ubuntu / Debian
-```bash
-sudo apt-get install python3-tk
-```
-
-### Conda
-```bash
-conda install tk
-```
-
----
-
-## Python version
+### Python Version
 
 Recommended:
 
 - Python 3.10 or newer
 
----
-
-## Environment variable
+## API Key
 
 Set your OpenAI API key before running.
 
 ### Windows PowerShell
+
 ```powershell
 $env:OPENAI_API_KEY="your_key_here"
 ```
 
 ### Windows CMD
+
 ```cmd
 set OPENAI_API_KEY=your_key_here
 ```
 
 ### macOS / Linux
+
 ```bash
 export OPENAI_API_KEY="your_key_here"
 ```
 
----
-
-## Run the app
+## Run
 
 ```bash
-python interruption_writing_helper.py
+python writing.py
 ```
 
----
+## Short Summary
 
-## Files
+### Already have
 
-Current files:
+- modular package structure
+- Tkinter desktop app
+- streaming writer
+- interruption by current sentence
+- previous-sentence context
+- stateless reason interpreter
+- stateless replacement generator
+- user-selectable local replacement options
+- concise preference profile
+- interruption / revision log reused by future generation
+- session JSON export
 
-- `interruption_writing_helper.py` — main prototype
-- `README.md` — this file
+### Still missing
 
----
-
-## Suggested next steps
-
-A reasonable next sequence would be:
-
-1. run the current file and confirm the UI opens
-2. verify streaming works with your installed AutoGen version
-3. decide the exact dissatisfaction label schema
-4. decide the exact restriction format
-5. decide whether monitor/style/memory stay rule-based or become LLM agents
-6. decide whether all agents share one state document or separate protocol messages
-7. add persistent storage if needed
-8. add evaluation logging
-
----
-
-## Short summary
-
-### Already built
-- popup frontend
-- user input
-- streaming main writer
-- interruption button
-- monitor feedback options
-- memory/style update scaffold
-- revision generation path
-- exportable session state
-- explicit agent wiring
-
-### Still to define
-- exact protocol for interpretation
-- exact restriction format
-- exact agent message format
-- local vs shared document/state design
-- persistent memory
-- evaluation module
-- package-version-specific stream polishing
+- persistent storage across runs
+- stronger edit-span control
+- replacement ranking / deduplication
+- stricter JSON/schema validation
+- analytics and evaluation
+- automated tests
+- optional environment/config convenience files
