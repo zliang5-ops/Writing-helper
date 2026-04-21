@@ -19,20 +19,6 @@ This project is a Tkinter desktop prototype for interruption-aware AI writing. I
 - The selected revision is applied back into the live document.
 - The inferred preference is added to the user's saved profile.
 
-### Persistence that already exists
-
-This part is already implemented.
-
-- User profiles are stored locally under `local_data/profiles/`.
-- Profiles are keyed by username.
-- A returning user loads their existing:
-  - preference profile
-  - revision history
-- A credential log is stored at `local_data/credential_log.json`.
-- Every applied revision is saved back to the user's profile automatically.
-
-This is important because the older README draft said persistence was missing, but the current code already includes basic local persistence.
-
 ### Current UI
 
 The Tkinter UI currently includes:
@@ -59,7 +45,6 @@ Current buttons:
 
 ### Current code structure
 
-- `writing.py`: small entry point
 - `writing_helper/main.py`: startup and API key check
 - `writing_helper/ui.py`: Tkinter app and event handling
 - `writing_helper/orchestrator.py`: workflow coordination and background loop
@@ -93,40 +78,15 @@ The app stores revision events containing:
 
 `Export Session JSON` currently shows a JSON snapshot in a popup window.
 
-## What We Were Missing Before
-
-Compared with the earlier project state, these pieces were missing before but are now present:
-
-- the large script has been split into a package with separate modules
-- the desktop UI is wired up
-- streaming generation is implemented
-- interruption context extraction is implemented
-- replacement-option generation is implemented
-- `Other` flows are implemented
-- per-user local profile persistence is implemented
-- revision history is saved and reused in future generations
-
-## What Is Still Missing
-
-The project still has several real gaps.
-
-### Setup and repo hygiene
-
-These are still missing from the repository:
-
-- `requirements.txt`
-- `.gitignore`
-- `.env` loading or config helper
-- automated tests
+## Whats Missing
 
 ### Robustness
 
-The current JSON handling is still lightweight:
+The JSON handling :
 
 - model output is parsed by extracting the first outer JSON object
 - there is fallback behavior if parsing fails
 - there is no strict schema validation
-- there are no retry loops for malformed model output
 
 ### Editing precision
 
@@ -135,24 +95,12 @@ Interruption handling is still fairly heuristic:
 - replacement is based on sentence-pattern extraction
 - applied revisions replace text from a computed `replacement_start`
 - there is no paragraph-aware or user-selection-based edit span
-- unusual punctuation, fragments, and list formats may behave imperfectly
 
 ### Option quality control
 
-Replacement options are not yet ranked or deduplicated:
-
 - one option is generated per reason
 - options are shown in returned order
-- weak duplicates are not filtered
 - there is no scoring pass
-
-### Profile management UX
-
-Profiles are saved, but management is still minimal:
-
-- no in-app profile editor
-- no delete/merge/prioritize workflow for preferences
-- no separate import/export flow for profiles
 
 ### Export and reporting polish
 
@@ -165,7 +113,6 @@ The architecture is in place, but it still needs more runtime verification:
 
 - real-world streaming behavior should be tested with actual OpenAI credentials
 - interruption timing and UI responsiveness need live validation
-- no automated regression coverage exists yet
 
 ## Current Workflow
 
@@ -189,7 +136,6 @@ pip install -U "autogen-agentchat" "autogen-ext[openai]" openai
 
 Recommended Python version:
 
-- Python 3.10+
 
 ## API Key
 
@@ -218,24 +164,3 @@ export OPENAI_API_KEY="your_key_here"
 ```bash
 python writing.py
 ```
-
-## Short Summary
-
-What we have now:
-
-- modular Tkinter app
-- streaming writer
-- interruption interpretation
-- local rewrite generation
-- `Other` custom revision flows
-- per-user local profile persistence
-- revision history reused in future generations
-
-What we are still missing:
-
-- repo/setup polish files
-- stronger validation and testing
-- better edit-span control
-- option ranking and deduplication
-- richer profile management
-- better export/reporting UX
