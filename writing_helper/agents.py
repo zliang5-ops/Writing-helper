@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from typing import Callable, List
@@ -5,7 +6,7 @@ from typing import Callable, List
 from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
-from .constants import MAX_REASON_OPTIONS, TARGET_REASON_OPTIONS
+from .constants import MAX_REASON_OPTIONS, STREAM_TOKEN_DELAY_SECONDS, TARGET_REASON_OPTIONS
 from .models import (
     InterpreterReasonCandidate,
     InterpreterResult,
@@ -434,6 +435,8 @@ class StreamingWriterAgent(StatelessLLMAgent):
             if isinstance(text, str) and text:
                 accumulated += text
                 on_token(text)
+                if STREAM_TOKEN_DELAY_SECONDS > 0:
+                    await asyncio.sleep(STREAM_TOKEN_DELAY_SECONDS)
         return accumulated
 
     def _build_prompt(self, state: SessionState) -> str:
