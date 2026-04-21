@@ -335,10 +335,65 @@ class WritingOrchestrator:
         await self._run_main_stream()
 
     def _preferred_profile_summary(self, interpreter_result: Optional[InterpreterResult], fallback: str) -> str:
+        fallback_text = fallback.strip()
+        if not fallback_text:
+            if interpreter_result is None:
+                return ""
+            return interpreter_result.profile_update.preference_summary.strip()
+
+        derived = self._derive_preference_from_reason(fallback_text)
+        if derived:
+            return derived
+
         if interpreter_result is None:
-            return fallback.strip()
+            return fallback_text
         summary = interpreter_result.profile_update.preference_summary.strip()
-        return summary or fallback.strip()
+        return summary or fallback_text
+
+    def _derive_preference_from_reason(self, reason_text: str) -> str:
+        reason = " ".join(reason_text.strip().split())
+        lowered = reason.lower()
+
+        preference_patterns = [
+            (
+                any(word in lowered for word in ["generic", "concrete detail", "sharper wording"]),
+                "Prefers writing that is concrete, specific, and supported with sharper detail.",
+            ),
+            (
+                any(word in lowered for word in ["too specific", "too narrow", "overcommit"]),
+                "Prefers writing that stays flexible and does not become too narrow or overcommitted too early.",
+            ),
+            (
+                any(word in lowered for word in ["example", "supporting detail", "evidence"]),
+                "Prefers claims to be grounded with stronger examples, evidence, or supporting detail.",
+            ),
+            (
+                any(word in lowered for word in ["thoughtful", "developed", "substantial claim", "insight"]),
+                "Prefers writing that develops ideas more thoughtfully instead of stating them too thinly.",
+            ),
+            (
+                any(word in lowered for word in ["repeat", "redund", "duplicate"]),
+                "Dislikes repetition and prefers each sentence to add a fresh move rather than restating earlier points.",
+            ),
+            (
+                any(word in lowered for word in ["tone", "voice", "off-style", "formal", "stiff"]),
+                "Prefers a tone and voice that match the user's intended style more closely.",
+            ),
+            (
+                any(word in lowered for word in ["long", "dense", "unclear", "harder to process"]),
+                "Prefers sentences that are easier to process, with clearer wording and lighter density.",
+            ),
+            (
+                any(word in lowered for word in ["transition", "align", "task"]),
+                "Prefers smoother transitions and closer alignment with the writing task.",
+            ),
+        ]
+
+        for matched, preference in preference_patterns:
+            if matched:
+                return preference
+
+        return reason
 
     def _stop_point_payload(self) -> dict:
         return {

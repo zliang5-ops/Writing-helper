@@ -6,7 +6,13 @@ from typing import Callable, List
 from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
-from .constants import MAX_REASON_OPTIONS, STREAM_TOKEN_DELAY_SECONDS, TARGET_REASON_OPTIONS
+from .constants import (
+    MAX_REASON_OPTIONS,
+    REPLACEMENT_TEMPERATURE,
+    STREAM_TOKEN_DELAY_SECONDS,
+    STREAMING_TEMPERATURE,
+    TARGET_REASON_OPTIONS,
+)
 from .models import (
     InterpreterReasonCandidate,
     InterpreterResult,
@@ -24,9 +30,12 @@ class BaseLocalAgent:
 
 
 class StatelessLLMAgent(BaseLocalAgent):
-    def __init__(self, name: str, model: str, system_message: str):
+    def __init__(self, name: str, model: str, system_message: str, temperature: float | None = None):
         super().__init__(name)
-        self.model_client = OpenAIChatCompletionClient(model=model)
+        client_kwargs = {"model": model}
+        if temperature is not None:
+            client_kwargs["temperature"] = temperature
+        self.model_client = OpenAIChatCompletionClient(**client_kwargs)
         self.agent = AssistantAgent(
             name=name,
             model_client=self.model_client,
@@ -117,9 +126,21 @@ Return exactly this structure:
 }}
 
 Constraints:
+- Use the interrupted sentence, the previous sentence, the task, and the saved user profile as evidence.
+- Return exactly {TARGET_REASON_OPTIONS} reason candidates.
+- Make the five reasons meaningfully different from one another.
+- The reasons may include issues such as:
+- too generic
+- too specific or too narrow
+- weak or missing example
+- not thoughtful enough
+- repetitive or redundant
+- tone or voice mismatch
+- too long, dense, or unclear
+- weak transition or weak task alignment
 - Use at most {MAX_REASON_OPTIONS} reason candidates.
-- Prefer around {TARGET_REASON_OPTIONS} reason candidates.
 - Keep reason candidates detailed enough to guide rewriting.
+- Make each reason specific to this stop point instead of generic writing advice.
 - Do not include any keys beyond the required structure.
 - Return JSON only.
 """
@@ -166,68 +187,35 @@ Constraints:
         parsed_reasons: List[InterpreterReasonCandidate],
         state: SessionState,
     ) -> List[InterpreterReasonCandidate]:
-        reasons = list(parsed_reasons)
-        existing = {item.reason.strip().lower() for item in reasons}
-        context = state.interruption_context
-        task_lower = state.task.lower()
-        current_lower = context.current_sentence.lower()
+        templates = self._reason_templates(state)
+        reasons: List[InterpreterReasonCandidate] = []
+        used_reason_texts: set[str] = set()
 
-        fallback_candidates = [
-            "The sentence may need clearer wording so the user can understand it immediately.",
-            "The sentence may feel too generic and may need more concrete detail.",
-            "The sentence may not match the tone or voice the user wants.",
-            "The sentence may be too long or dense for the desired pacing.",
-            "The sentence may need to connect more smoothly to the previous sentence.",
-            "The sentence may not align tightly enough with the task goal.",
-            "The sentence may need a stronger or more specific next step.",
-        ]
-        if "academic" in task_lower:
-            fallback_candidates.insert(
-                0,
-                "The sentence may need a more rigorous or academic tone for this task.",
+        for index, template in enumerate(templates, start=1):
+            matched_reason = next(
+                (
+                    candidate.reason.strip()
+                    for candidate in parsed_reasons
+                    if candidate.reason.strip() and template["match"](candidate.reason.strip().lower())
+                ),
+                "",
             )
-        if any(word in current_lower for word in ["moreover", "furthermore", "therefore", "indeed"]):
-            fallback_candidates.insert(
-                0,
-                "The sentence may sound too formal or stiff for the user's intended voice.",
-            )
-
-        for candidate in fallback_candidates:
-            key = candidate.strip().lower()
-            if key in existing:
+            chosen_reason = matched_reason or template["text"]
+            normalized = chosen_reason.lower()
+            if normalized in used_reason_texts:
                 continue
-            reasons.append(
-                InterpreterReasonCandidate(
-                    id=f"R{len(reasons) + 1}",
-                    reason=candidate,
-                )
-            )
-            existing.add(key)
+            reasons.append(InterpreterReasonCandidate(id=f"R{len(reasons) + 1}", reason=chosen_reason))
+            used_reason_texts.add(normalized)
             if len(reasons) >= TARGET_REASON_OPTIONS:
                 break
 
-        return reasons[:MAX_REASON_OPTIONS]
+        return reasons[:TARGET_REASON_OPTIONS]
 
     def _fallback_interpretation(self, state: SessionState) -> InterpreterResult:
-        context = state.interruption_context
-        reasons: List[InterpreterReasonCandidate] = []
-
-        def add(reason: str) -> None:
-            if len(reasons) >= TARGET_REASON_OPTIONS:
-                return
-            reason_id = f"R{len(reasons) + 1}"
-            reasons.append(InterpreterReasonCandidate(id=reason_id, reason=reason))
-
-        current_lower = context.current_sentence.lower()
-        task_lower = state.task.lower()
-        if any(word in current_lower for word in ["moreover", "furthermore", "therefore", "indeed"]):
-            add("The sentence may sound too formal or too stiff for the user's intended voice.")
-        if len(context.current_sentence.split()) > 20:
-            add("The sentence may be too long or too dense for the pacing the user wants.")
-        if "academic" in task_lower:
-            add("The sentence may not sound rigorous or academic enough for the task.")
-        add("The sentence may be too generic and may need more concrete or targeted wording.")
-        add("The sentence may not align tightly enough with the user's likely intent.")
+        reasons = [
+            InterpreterReasonCandidate(id=f"R{index}", reason=template["text"])
+            for index, template in enumerate(self._reason_templates(state), start=1)
+        ]
 
         return InterpreterResult(
             stop_point=state.interruption_context,
@@ -250,6 +238,71 @@ Constraints:
                 confidence=0.45,
             ),
         )
+
+    def _reason_templates(self, state: SessionState) -> List[dict]:
+        current_sentence = state.interruption_context.current_sentence.strip() or "the interrupted sentence"
+        last_sentence = state.interruption_context.last_sentence.strip() or "the previous sentence"
+        task = state.task.strip() or "the user's task"
+        profile = ", ".join(state.preference_profile[-3:]) if state.preference_profile else "the saved user profile"
+
+        return [
+            {
+                "text": (
+                    f"The sentence may be too generic for {task}; based on '{current_sentence}', it may need more "
+                    f"concrete detail, examples, or sharper wording."
+                ),
+                "match": lambda reason: "generic" in reason or "concrete" in reason or "detail" in reason,
+            },
+            {
+                "text": (
+                    f"The sentence may be too specific or too narrow too early, which could overcommit the draft "
+                    f"in a way that limits how the writing can develop for {task}."
+                ),
+                "match": lambda reason: "specific" in reason or "narrow" in reason or "overcommit" in reason,
+            },
+            {
+                "text": (
+                    f"The sentence may need a stronger example or supporting detail; at this stop point, the writing "
+                    f"may gesture at an idea without grounding it enough for {task}."
+                ),
+                "match": lambda reason: "example" in reason or "support" in reason or "evidence" in reason,
+            },
+            {
+                "text": (
+                    f"The point in '{current_sentence}' may not feel thoughtful or developed enough yet, so the user "
+                    f"may want a more substantial claim or insight."
+                ),
+                "match": lambda reason: "thoughtful" in reason or "developed" in reason or "insight" in reason,
+            },
+            {
+                "text": (
+                    f"The sentence may repeat information that is already implied by '{last_sentence}', so it may need "
+                    f"less redundancy and a fresher next move."
+                ),
+                "match": lambda reason: "repeat" in reason or "redund" in reason or "duplicate" in reason,
+            },
+            {
+                "text": (
+                    f"The sentence may not match the user's preferred tone or voice suggested by {profile}; "
+                    f"the wording at '{current_sentence}' may sound off-style."
+                ),
+                "match": lambda reason: "tone" in reason or "voice" in reason or "formal" in reason or "stiff" in reason,
+            },
+            {
+                "text": (
+                    f"The sentence may be too long, dense, or unclear at the stop point, making it harder to process "
+                    f"quickly during streaming."
+                ),
+                "match": lambda reason: "long" in reason or "dense" in reason or "clear" in reason or "unclear" in reason,
+            },
+            {
+                "text": (
+                    f"The sentence may transition weakly from '{last_sentence}' or may not align tightly enough "
+                    f"with the task '{task}'."
+                ),
+                "match": lambda reason: "transition" in reason or "align" in reason or "task" in reason or "intent" in reason,
+            },
+        ]
 
 
 def stateful_stop_point(termination_point: str, last_sentence: str, current_sentence: str):
@@ -352,6 +405,7 @@ class ReplacementAgent(StatelessLLMAgent):
         super().__init__(
             name=name,
             model=model,
+            temperature=REPLACEMENT_TEMPERATURE,
             system_message=(
                 "You generate replacement options for an interrupted sentence. "
                 "Return only valid JSON."
@@ -386,6 +440,11 @@ Return JSON with this structure:
     }}
   ]
 }}
+
+Constraints:
+- Return exactly one option for each of R1, R2, R3, R4, and R5.
+- Make the options noticeably different from each other.
+- Use the five reason diagnoses as distinct revision directions instead of repeating the same diagnosis.
 
 Return JSON only.
 """
@@ -441,7 +500,6 @@ Return only the replacement sentence or short local revision.
         return custom_instruction.strip()
 
     def _fallback_replacements(self, state: SessionState, interpreter_result: InterpreterResult) -> List[ReplacementOption]:
-        sentence = state.interruption_context.current_sentence.strip() or "Continue with a clearer sentence."
         options: List[ReplacementOption] = []
         for reason in interpreter_result.reason_candidates:
             options.append(
@@ -450,7 +508,7 @@ Return only the replacement sentence or short local revision.
                     reason_id=reason.id,
                     reason=reason.reason,
                     explanation=reason.reason,
-                    replacement_text=sentence,
+                    replacement_text=self._fallback_rewrite_for_reason(state, reason.id),
                 )
             )
         return self._ensure_target_replacements(options, state, interpreter_result)
@@ -463,7 +521,6 @@ Return only the replacement sentence or short local revision.
     ) -> List[ReplacementOption]:
         completed = list(options)
         covered_reason_ids = {item.reason_id for item in completed}
-        fallback_sentence = state.interruption_context.current_sentence.strip() or "Continue with a clearer sentence."
 
         for reason in interpreter_result.reason_candidates:
             if reason.id in covered_reason_ids:
@@ -474,7 +531,7 @@ Return only the replacement sentence or short local revision.
                     reason_id=reason.id,
                     reason=reason.reason,
                     explanation=reason.reason,
-                    replacement_text=fallback_sentence,
+                    replacement_text=self._fallback_rewrite_for_reason(state, reason.id),
                 )
             )
             covered_reason_ids.add(reason.id)
@@ -483,12 +540,42 @@ Return only the replacement sentence or short local revision.
 
         return completed[:MAX_REASON_OPTIONS]
 
+    def _fallback_rewrite_for_reason(self, state: SessionState, reason_id: str) -> str:
+        sentence = (state.interruption_context.current_sentence or "").strip()
+        task = state.task.strip() or "the task"
+        previous_sentence = state.interruption_context.last_sentence.strip()
+        compact = " ".join(sentence.split()).rstrip(".!?")
+
+        if not compact:
+            return "Continue with a clearer sentence that fits the task."
+
+        if reason_id == "R1":
+            return f"{compact}, with a more concrete detail tied directly to {task}."
+        if reason_id == "R2":
+            return f"{compact}, but framed a bit more broadly so it does not lock the draft in too early."
+        if reason_id == "R3":
+            return f"{compact}, with a stronger supporting example or clearer evidence."
+        if reason_id == "R4":
+            return f"{compact}, with a more thoughtful and developed point."
+        if reason_id == "R5":
+            return f"{compact}, without repeating what has already been said."
+        if reason_id == "R6":
+            return f"{compact}, expressed in a more natural and user-aligned voice."
+        if reason_id == "R7":
+            first_clause = compact.split(",")[0].strip()
+            return f"{first_clause}."
+        if reason_id == "R8":
+            prefix = "Building on that point, " if previous_sentence else "From there, "
+            return f"{prefix}{compact[:1].lower() + compact[1:] if len(compact) > 1 else compact.lower()}."
+        return f"{compact}, revised to better fit the user's intent."
+
 
 class StreamingWriterAgent(StatelessLLMAgent):
     def __init__(self, model: str = "gpt-4o-mini", name: str = "streaming_writer_agent"):
         super().__init__(
             name=name,
             model=model,
+            temperature=STREAMING_TEMPERATURE,
             system_message=(
                 "You are the main writing generator in an interruption-aware writing system. "
                 "Generate streaming prose that follows the user's task and saved profile. "
