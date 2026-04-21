@@ -139,6 +139,7 @@ Constraints:
             for index, item in enumerate(reasons)
             if str(item.get("reason", "")).strip()
         ]
+        parsed_reasons = self._ensure_target_reason_candidates(parsed_reasons, state)
         guidance = payload.get("replacement_guidance", {})
         profile_update = payload.get("profile_update", {})
         return InterpreterResult(
@@ -159,6 +160,53 @@ Constraints:
                 confidence=float(profile_update.get("confidence", 0.0) or 0.0),
             ),
         )
+
+    def _ensure_target_reason_candidates(
+        self,
+        parsed_reasons: List[InterpreterReasonCandidate],
+        state: SessionState,
+    ) -> List[InterpreterReasonCandidate]:
+        reasons = list(parsed_reasons)
+        existing = {item.reason.strip().lower() for item in reasons}
+        context = state.interruption_context
+        task_lower = state.task.lower()
+        current_lower = context.current_sentence.lower()
+
+        fallback_candidates = [
+            "The sentence may need clearer wording so the user can understand it immediately.",
+            "The sentence may feel too generic and may need more concrete detail.",
+            "The sentence may not match the tone or voice the user wants.",
+            "The sentence may be too long or dense for the desired pacing.",
+            "The sentence may need to connect more smoothly to the previous sentence.",
+            "The sentence may not align tightly enough with the task goal.",
+            "The sentence may need a stronger or more specific next step.",
+        ]
+        if "academic" in task_lower:
+            fallback_candidates.insert(
+                0,
+                "The sentence may need a more rigorous or academic tone for this task.",
+            )
+        if any(word in current_lower for word in ["moreover", "furthermore", "therefore", "indeed"]):
+            fallback_candidates.insert(
+                0,
+                "The sentence may sound too formal or stiff for the user's intended voice.",
+            )
+
+        for candidate in fallback_candidates:
+            key = candidate.strip().lower()
+            if key in existing:
+                continue
+            reasons.append(
+                InterpreterReasonCandidate(
+                    id=f"R{len(reasons) + 1}",
+                    reason=candidate,
+                )
+            )
+            existing.add(key)
+            if len(reasons) >= TARGET_REASON_OPTIONS:
+                break
+
+        return reasons[:MAX_REASON_OPTIONS]
 
     def _fallback_interpretation(self, state: SessionState) -> InterpreterResult:
         context = state.interruption_context
@@ -359,7 +407,7 @@ Return JSON only.
                         )
                     )
             if options:
-                return options
+                return self._ensure_target_replacements(options, state, interpreter_result)
         except Exception:
             pass
         return self._fallback_replacements(state, interpreter_result)
@@ -405,7 +453,35 @@ Return only the replacement sentence or short local revision.
                     replacement_text=sentence,
                 )
             )
-        return options
+        return self._ensure_target_replacements(options, state, interpreter_result)
+
+    def _ensure_target_replacements(
+        self,
+        options: List[ReplacementOption],
+        state: SessionState,
+        interpreter_result: InterpreterResult,
+    ) -> List[ReplacementOption]:
+        completed = list(options)
+        covered_reason_ids = {item.reason_id for item in completed}
+        fallback_sentence = state.interruption_context.current_sentence.strip() or "Continue with a clearer sentence."
+
+        for reason in interpreter_result.reason_candidates:
+            if reason.id in covered_reason_ids:
+                continue
+            completed.append(
+                ReplacementOption(
+                    option_id=str(uuid.uuid4()),
+                    reason_id=reason.id,
+                    reason=reason.reason,
+                    explanation=reason.reason,
+                    replacement_text=fallback_sentence,
+                )
+            )
+            covered_reason_ids.add(reason.id)
+            if len(completed) >= TARGET_REASON_OPTIONS:
+                break
+
+        return completed[:MAX_REASON_OPTIONS]
 
 
 class StreamingWriterAgent(StatelessLLMAgent):

@@ -14,7 +14,7 @@ from .agents import (
     ReplacementAgent,
     StreamingWriterAgent,
 )
-from .constants import MAX_REASON_OPTIONS
+from .constants import MAX_REASON_OPTIONS, TARGET_REASON_OPTIONS
 from .models import InterpreterResult, ReplacementOption, RevisionEvent, SessionState, UserProfile
 from .storage import load_or_create_user_profile, save_user_profile
 from .text_utils import extract_interruption_context
@@ -229,7 +229,11 @@ class WritingOrchestrator:
 
         self._emit("interpreter_result", interpreter_result.to_dict())
         self._emit("replacement_options", [asdict(option) for option in options])
-        self._emit("status", "Replacement options are ready. Select one or use Other.")
+        self._emit(
+            "status",
+            f"Replacement options are ready. Select one and click Apply to replace the interrupted sentence. "
+            f"Target options: {TARGET_REASON_OPTIONS}; current generated options: {max(0, len(options) - 1)}.",
+        )
 
     async def _handle_other_flow(self, other_mode: str, other_text: str) -> None:
         self._set_busy(True)
@@ -285,6 +289,7 @@ class WritingOrchestrator:
         prefix = self.state.live_text[:start].rstrip()
         revision = selected_revision.strip()
         self.state.live_text = f"{prefix} {revision}".strip() if prefix else revision
+        self.state.accepted_text = self.state.live_text
 
         interpreter_result = self.state.active_interpreter_result.to_dict() if self.state.active_interpreter_result else {}
         event = RevisionEvent(
@@ -307,6 +312,7 @@ class WritingOrchestrator:
         self.state.replacement_options = []
         self.state.active_interpreter_result = None
         self._emit("set_text", self.state.live_text)
+        self._emit("accepted_text", self.state.accepted_text)
         self._emit("profile_update", self.state.preference_profile)
         self._emit("replacement_options", [])
         self._emit(
@@ -319,7 +325,14 @@ class WritingOrchestrator:
                 "profile_summary_added": profile_summary,
             },
         )
-        self._emit("status", "Revision applied and saved to the user profile.")
+        self._emit("status", "Revision applied, saved to the user profile, and accepted as the new baseline. Continuing generation...")
+        self._submit_coroutine(self._resume_after_revision())
+
+    async def _resume_after_revision(self) -> None:
+        while self._busy.is_set():
+            await asyncio.sleep(0.05)
+        self._stop_flag.clear()
+        await self._run_main_stream()
 
     def _preferred_profile_summary(self, interpreter_result: Optional[InterpreterResult], fallback: str) -> str:
         if interpreter_result is None:

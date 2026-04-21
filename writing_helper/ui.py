@@ -110,7 +110,7 @@ class WritingHelperApp:
 
         self.apply_replacement_btn = ttk.Button(
             right_frame,
-            text="Apply Selected Option",
+            text="Apply Selected Option and Continue",
             command=self._apply_option,
         )
         self.apply_replacement_btn.pack(anchor="w", pady=(0, 10))
@@ -183,6 +183,7 @@ class WritingHelperApp:
 
     def _set_replacement_options(self, options: List[Dict[str, Any]]) -> None:
         self._clear_replacement_options()
+        first_selectable_option = ""
         for option in options:
             text = f"{option['reason_id']} - {option['reason']}\n{option['explanation']}"
             if option["replacement_text"]:
@@ -197,6 +198,10 @@ class WritingHelperApp:
                 variable=self.selected_option_var,
             )
             rb.pack(anchor="w", pady=4, fill="x")
+            if not first_selectable_option and option.get("option_kind") != "other":
+                first_selectable_option = option["option_id"]
+        if first_selectable_option:
+            self.selected_option_var.set(first_selectable_option)
 
     def _append_log(self, text: str) -> None:
         self.log_text.insert("end", text)
