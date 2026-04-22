@@ -107,6 +107,11 @@ class WritingHelperApp:
         ttk.Label(right_frame, text="Other Input").pack(anchor="w")
         self.other_text = tk.Text(right_frame, height=6, wrap="word")
         self.other_text.pack(fill="x", pady=(4, 8))
+        ttk.Label(
+            right_frame,
+            text="If none of the generated options fit, select a custom-input option below and type here.",
+            wraplength=420,
+        ).pack(anchor="w", pady=(0, 8))
 
         self.apply_replacement_btn = ttk.Button(
             right_frame,
@@ -185,12 +190,20 @@ class WritingHelperApp:
         self._clear_replacement_options()
         first_selectable_option = ""
         for option in options:
-            text = f"{option['reason_id']} - {option['reason']}\n{option['explanation']}"
+            title = f"{option['reason_id']} - {option['reason']}"
+            if len(title) > 120:
+                title = title[:117] + "..."
+            explanation = option["explanation"]
+            if len(explanation) > 140:
+                explanation = explanation[:137] + "..."
+            text = f"{title}\n{explanation}"
             if option["replacement_text"]:
                 preview = option["replacement_text"]
-                if len(preview) > 180:
-                    preview = preview[:177] + "..."
+                if len(preview) > 220:
+                    preview = preview[:217] + "..."
                 text += f"\nReplacement: {preview}"
+            elif option.get("option_kind") in {"other_describe", "other_write"}:
+                text += "\nUse the Other Input box below."
             rb = ttk.Radiobutton(
                 self.options_frame,
                 text=text,
@@ -229,7 +242,7 @@ class WritingHelperApp:
                     self.output_text.see("end")
                 elif event_type == "interpreter_result":
                     self.interpreter_text.delete("1.0", "end")
-                    self.interpreter_text.insert("1.0", json.dumps(payload, ensure_ascii=False, indent=2))
+                    self.interpreter_text.insert("1.0", self._format_interpreter_result(payload))
                 elif event_type == "replacement_options":
                     self._set_replacement_options(payload)
                     self._append_log("[ReplacementHelper] Options updated.\n")
@@ -260,3 +273,33 @@ class WritingHelperApp:
             self.orchestrator.shutdown()
         finally:
             self.root.destroy()
+
+    def _format_interpreter_result(self, payload: Dict[str, Any]) -> str:
+        lines: List[str] = []
+        stop_point = payload.get("stop_point", {})
+        likely_intent = payload.get("likely_user_intent", "").strip()
+        if likely_intent:
+            lines.append(f"Likely intent: {likely_intent}")
+        current_sentence = stop_point.get("current_sentence", "").strip()
+        if current_sentence:
+            lines.append(f"Interrupted sentence: {current_sentence}")
+        last_sentence = stop_point.get("last_sentence", "").strip()
+        if last_sentence:
+            lines.append(f"Previous sentence: {last_sentence}")
+
+        reasons = payload.get("reason_candidates", [])
+        if reasons:
+            lines.append("")
+            lines.append("Interpreted revision reasons:")
+            for item in reasons:
+                reason_id = item.get("id", "").strip()
+                reason = item.get("reason", "").strip()
+                lines.append(f"{reason_id}: {reason}")
+
+        guidance = payload.get("replacement_guidance", {})
+        goal = guidance.get("goal", "").strip()
+        if goal:
+            lines.append("")
+            lines.append(f"Replacement goal: {goal}")
+
+        return "\n".join(lines)

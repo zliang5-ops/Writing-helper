@@ -7,7 +7,9 @@ from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from .constants import (
+    MAX_REPLACEMENT_WORDS,
     MAX_REASON_OPTIONS,
+    PROFILE_MEMORY_TEMPERATURE,
     REPLACEMENT_TEMPERATURE,
     STREAM_TOKEN_DELAY_SECONDS,
     STREAMING_TEMPERATURE,
@@ -56,14 +58,92 @@ class StatelessLLMAgent(BaseLocalAgent):
 
 
 class PreferenceMemoryAgent(BaseLocalAgent):
-    def __init__(self, name: str = "preference_memory_agent"):
+    def __init__(self, model: str = "gpt-4o-mini", name: str = "preference_memory_agent"):
         super().__init__(name)
+        self.model_client = OpenAIChatCompletionClient(model=model, temperature=PROFILE_MEMORY_TEMPERATURE)
+        self.agent = AssistantAgent(
+            name=name,
+            model_client=self.model_client,
+            model_client_stream=True,
+            system_message=(
+                "You write short reusable user writing preferences from revision choices. "
+                "Return only one concise preference sentence."
+            ),
+        )
 
     def update_profile(self, existing_profile: List[str], summary: str) -> List[str]:
         cleaned = summary.strip()
         if not cleaned:
             return list(existing_profile)
         return list(dict.fromkeys(existing_profile + [cleaned]))
+
+    async def summarize_choice(
+        self,
+        task: str,
+        current_sentence: str,
+        selected_reason: str,
+        selected_revision: str,
+        existing_profile: List[str],
+    ) -> str:
+        preferences = "\n".join(f"- {item}" for item in existing_profile) or "- None yet."
+        prompt = f"""
+Write one concise reusable user preference based on the chosen revision.
+
+Task:
+{task}
+
+Current interrupted sentence:
+{current_sentence}
+
+Selected reason:
+{selected_reason}
+
+Selected revision:
+{selected_revision}
+
+Existing user profile:
+{preferences}
+
+Constraints:
+- Return exactly one sentence.
+- Describe a durable writing preference, not a one-off edit.
+- Keep it under 18 words.
+- Do not mention JSON, tasks, or specific quoted text unless necessary.
+- Return plain text only.
+"""
+        try:
+            parts: List[str] = []
+            async for item in self.agent.run_stream(task=prompt):
+                text = getattr(item, "content", None)
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            summary = " ".join("".join(parts).split()).strip()
+            return summary.strip("\"' ")
+        except Exception:
+            return self._fallback_summary(selected_reason)
+
+    async def close(self) -> None:
+        await self.model_client.close()
+
+    def _fallback_summary(self, selected_reason: str) -> str:
+        lowered = selected_reason.lower()
+        if any(word in lowered for word in ["generic", "concrete", "detail"]):
+            return "Prefers concrete writing with sharper detail."
+        if any(word in lowered for word in ["specific", "narrow", "overcommit"]):
+            return "Prefers ideas that stay flexible before narrowing."
+        if any(word in lowered for word in ["example", "evidence", "support"]):
+            return "Prefers claims supported by examples or evidence."
+        if any(word in lowered for word in ["thoughtful", "insight", "developed"]):
+            return "Prefers more thoughtful and developed points."
+        if any(word in lowered for word in ["repeat", "redund", "duplicate"]):
+            return "Dislikes repetition and redundant phrasing."
+        if any(word in lowered for word in ["tone", "voice", "formal", "stiff"]):
+            return "Prefers a tone that matches the intended voice."
+        if any(word in lowered for word in ["long", "dense", "unclear"]):
+            return "Prefers clear sentences with lighter density."
+        if any(word in lowered for word in ["transition", "align", "task"]):
+            return "Prefers smoother transitions and tighter task alignment."
+        return selected_reason.strip()
 
 
 class InterruptionInterpreterAgent(StatelessLLMAgent):
@@ -129,12 +209,17 @@ Constraints:
 - Use the interrupted sentence, the previous sentence, the task, and the saved user profile as evidence.
 - Return exactly {TARGET_REASON_OPTIONS} reason candidates.
 - Make the five reasons meaningfully different from one another.
+- Prefer content-related critiques when they are supported by the stop point.
+- Keep style and voice critiques available, but do not let them crowd out content critiques.
 - The reasons may include issues such as:
 - too generic
 - too specific or too narrow
 - weak or missing example
 - not thoughtful enough
 - repetitive or redundant
+- weak contribution claim
+- unclear mechanism or intuition
+- unsupported or under-qualified claim
 - tone or voice mismatch
 - too long, dense, or unclear
 - weak transition or weak task alignment
@@ -280,6 +365,27 @@ Constraints:
                     f"less redundancy and a fresher next move."
                 ),
                 "match": lambda reason: "repeat" in reason or "redund" in reason or "duplicate" in reason,
+            },
+            {
+                "text": (
+                    f"The contribution claim in '{current_sentence}' may not yet feel strong or distinct enough, so "
+                    f"the user may want a clearer statement of what is new or important."
+                ),
+                "match": lambda reason: "contribution" in reason or "novel" in reason or "new" in reason or "important" in reason,
+            },
+            {
+                "text": (
+                    f"The sentence may point toward a result without making the mechanism or intuition clear enough, "
+                    f"so the reader may not yet see why the claim should hold."
+                ),
+                "match": lambda reason: "mechanism" in reason or "intuition" in reason or "why" in reason or "explain" in reason,
+            },
+            {
+                "text": (
+                    f"The claim in '{current_sentence}' may feel under-supported or insufficiently qualified, so the "
+                    f"user may want stronger evidence, framing, or caveats."
+                ),
+                "match": lambda reason: "under-supported" in reason or "unsupported" in reason or "qualified" in reason or "caveat" in reason,
             },
             {
                 "text": (
@@ -442,9 +548,12 @@ Return JSON with this structure:
 }}
 
 Constraints:
-- Return exactly one option for each of R1, R2, R3, R4, and R5.
+- Return exactly one option for each reason candidate provided in the interpreter result.
 - Make the options noticeably different from each other.
-- Use the five reason diagnoses as distinct revision directions instead of repeating the same diagnosis.
+- Use the reason diagnoses as distinct revision directions instead of repeating the same diagnosis.
+- Rewrite only the interrupted sentence or immediate local span.
+- Do not copy the full task description, bullet lists, or prompt text into the replacement.
+- Each replacement_text must be short: at most two sentences and preferably under {MAX_REPLACEMENT_WORDS} words.
 
 Return JSON only.
 """
@@ -456,6 +565,11 @@ Return JSON only.
                 reason_id = str(item.get("reason_id", "")).strip()
                 replacement_text = str(item.get("replacement_text", "")).strip()
                 if reason_id and replacement_text and reason_id in reason_map:
+                    replacement_text = self._sanitize_replacement_text(
+                        replacement_text=replacement_text,
+                        state=state,
+                        reason_id=reason_id,
+                    )
                     options.append(
                         ReplacementOption(
                             option_id=str(uuid.uuid4()),
@@ -568,6 +682,29 @@ Return only the replacement sentence or short local revision.
             prefix = "Building on that point, " if previous_sentence else "From there, "
             return f"{prefix}{compact[:1].lower() + compact[1:] if len(compact) > 1 else compact.lower()}."
         return f"{compact}, revised to better fit the user's intent."
+
+    def _sanitize_replacement_text(self, replacement_text: str, state: SessionState, reason_id: str) -> str:
+        normalized = " ".join(replacement_text.split()).strip()
+        if not normalized:
+            return self._fallback_rewrite_for_reason(state, reason_id)
+
+        lowered = normalized.lower()
+        forbidden_markers = [
+            "please produce:",
+            "instruction:",
+            "saved user profile:",
+            "current live text:",
+            "current accepted text:",
+            "user task:",
+            "interpreter result:",
+        ]
+        if any(marker in lowered for marker in forbidden_markers):
+            return self._fallback_rewrite_for_reason(state, reason_id)
+
+        if len(normalized.split()) > MAX_REPLACEMENT_WORDS:
+            return self._fallback_rewrite_for_reason(state, reason_id)
+
+        return normalized
 
 
 class StreamingWriterAgent(StatelessLLMAgent):

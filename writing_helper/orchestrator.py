@@ -58,6 +58,7 @@ class WritingOrchestrator:
             await self.interpreter_agent.close()
             await self.behavior_interpreter_agent.close()
             await self.replacement_agent.close()
+            await self.memory_agent.close()
 
         try:
             if self._loop and self._loop.is_running():
@@ -147,24 +148,14 @@ class WritingOrchestrator:
             self._emit("error", "Please select a replacement option.")
             return
 
-        if selected.option_kind == "other":
-            if other_mode not in {"describe_revision", "write_own_text"}:
-                self._emit("error", "Please choose how you want to use Other.")
-                return
+        if selected.option_kind in {"other_describe", "other_write"}:
             if not other_text.strip():
-                self._emit("error", "Please enter text for the selected Other action.")
+                self._emit("error", "Please enter text for the selected custom action.")
                 return
-            self._submit_coroutine(self._handle_other_flow(other_mode, other_text.strip()))
+            resolved_mode = "describe_revision" if selected.option_kind == "other_describe" else "write_own_text"
+            self._submit_coroutine(self._handle_other_flow(resolved_mode, other_text.strip()))
             return
-
-        self._apply_revision_selection(
-            selected_reason_id=selected.reason_id,
-            selected_reason=selected.reason,
-            selected_revision=selected.replacement_text,
-            selection_kind="replacement_option",
-            custom_input="",
-            profile_summary=self._preferred_profile_summary(self.state.active_interpreter_result, selected.reason),
-        )
+        self._submit_coroutine(self._handle_selected_option(selected))
 
     def export_session_json(self) -> str:
         payload = {
@@ -218,11 +209,21 @@ class WritingOrchestrator:
         options.append(
             ReplacementOption(
                 option_id=str(uuid.uuid4()),
-                reason_id="OTHER",
-                reason="Other",
-                explanation="Choose this if none of the generated options fit.",
+                reason_id="OTHER_DESCRIBE",
+                reason="Return To User Input",
+                explanation="Use this to describe what should change if none of the generated options fit.",
                 replacement_text="",
-                option_kind="other",
+                option_kind="other_describe",
+            )
+        )
+        options.append(
+            ReplacementOption(
+                option_id=str(uuid.uuid4()),
+                reason_id="OTHER_WRITE",
+                reason="Write My Own Replacement",
+                explanation="Use this to type your own replacement sentence directly.",
+                replacement_text="",
+                option_kind="other_write",
             )
         )
         self.state.replacement_options = options
@@ -232,7 +233,8 @@ class WritingOrchestrator:
         self._emit(
             "status",
             f"Replacement options are ready. Select one and click Apply to replace the interrupted sentence. "
-            f"Target options: {TARGET_REASON_OPTIONS}; current generated options: {max(0, len(options) - 1)}.",
+            f"You can also choose 'Return To User Input' or 'Write My Own Replacement'. "
+            f"Target options: {TARGET_REASON_OPTIONS}; current generated options: {max(0, len(options) - 2)}.",
         )
 
     async def _handle_other_flow(self, other_mode: str, other_text: str) -> None:
@@ -250,24 +252,61 @@ class WritingOrchestrator:
                     passage=self.state.live_text,
                     custom_instruction=other_text,
                 )
+                profile_summary = await self.memory_agent.summarize_choice(
+                    task=self.state.task,
+                    current_sentence=self.state.interruption_context.current_sentence,
+                    selected_reason=other_text,
+                    selected_revision=generated_revision,
+                    existing_profile=self.state.preference_profile,
+                )
                 self._apply_revision_selection(
                     selected_reason_id="OTHER",
                     selected_reason="Other",
                     selected_revision=generated_revision,
                     selection_kind="other_describe_revision",
                     custom_input=other_text,
-                    profile_summary=self._preferred_profile_summary(behavior_result, other_text),
+                    profile_summary=profile_summary or self._preferred_profile_summary(behavior_result, other_text),
                 )
             else:
+                profile_summary = await self.memory_agent.summarize_choice(
+                    task=self.state.task,
+                    current_sentence=self.state.interruption_context.current_sentence,
+                    selected_reason=other_text,
+                    selected_revision=other_text,
+                    existing_profile=self.state.preference_profile,
+                )
                 self._apply_revision_selection(
                     selected_reason_id="OTHER",
                     selected_reason="Other",
                     selected_revision=other_text,
                     selection_kind="other_write_own_text",
                     custom_input=other_text,
-                    profile_summary=self._preferred_profile_summary(behavior_result, other_text),
+                    profile_summary=profile_summary or self._preferred_profile_summary(behavior_result, other_text),
                 )
             self._emit("interpreter_result", behavior_result.to_dict())
+        except Exception as e:
+            self._emit("error", f"{type(e).__name__}: {e}")
+        finally:
+            self._set_busy(False)
+
+    async def _handle_selected_option(self, selected: ReplacementOption) -> None:
+        self._set_busy(True)
+        try:
+            profile_summary = await self.memory_agent.summarize_choice(
+                task=self.state.task,
+                current_sentence=self.state.interruption_context.current_sentence,
+                selected_reason=selected.reason,
+                selected_revision=selected.replacement_text,
+                existing_profile=self.state.preference_profile,
+            )
+            self._apply_revision_selection(
+                selected_reason_id=selected.reason_id,
+                selected_reason=selected.reason,
+                selected_revision=selected.replacement_text,
+                selection_kind="replacement_option",
+                custom_input="",
+                profile_summary=profile_summary or self._preferred_profile_summary(self.state.active_interpreter_result, selected.reason),
+            )
         except Exception as e:
             self._emit("error", f"{type(e).__name__}: {e}")
         finally:
